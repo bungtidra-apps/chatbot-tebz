@@ -1,195 +1,119 @@
 import streamlit as st
-import openai
-import PyPDF2
+from openai import OpenAI
+from PyPDF2 import PdfReader
 import io
-import tiktoken # Untuk menghitung token, penting untuk manajemen API
 
-# --- Konfigurasi Halaman Streamlit ---
-st.set_page_config(
-    page_title="Penganalisis Kontrak PDF dengan OpenAI",
-    page_icon="📄",
-    layout="wide" # Menggunakan layout wide agar lebih banyak ruang
-)
-
-st.title("📄 Penganalisis Kontrak Kontrak PDF dengan OpenAI")
-st.markdown("""
-Aplikasi ini memungkinkan Anda mengunggah dokumen kontrak dalam format PDF dan mendapatkan analisis mendalam
-menggunakan kekuatan model bahasa AI dari OpenAI. Masukkan API Key Anda di sidebar,
-unggah kontrak, dan pilih jenis analisis yang Anda inginkan.
-""")
-
-# --- Sidebar untuk API Key dan Model Selection ---
-with st.sidebar:
-    st.header("🔑 Konfigurasi OpenAI")
-    openai_api_key = st.text_input(
-        "Masukkan OpenAI API Key Anda",
-        type="password", # Menyembunyikan input untuk keamanan
-        help="Anda bisa mendapatkan API key Anda dari: https://platform.openai.com/account/api-keys"
-    )
-    st.info("API Key Anda hanya digunakan untuk sesi ini dan tidak akan disimpan.")
-
-    st.subheader("Pengaturan Model AI")
-    model_choice = st.selectbox(
-        "Pilih Model OpenAI:",
-        ("gpt-4o", "gpt-4-turbo", "gpt-3.5-turbo"), # gpt-4o adalah yang terbaru dan seringkali terbaik
-        help="Pilih model AI yang akan digunakan untuk analisis. gpt-4o umumnya memberikan hasil terbaik, gpt-3.5-turbo lebih murah dan cepat."
-    )
-    temperature = st.slider(
-        "Kreativitas Model (Temperature)",
-        min_value=0.0, max_value=1.0, value=0.7, step=0.1,
-        help="Nilai yang lebih tinggi (mendekati 1.0) akan membuat output lebih kreatif dan bervariasi. Nilai yang lebih rendah (mendekati 0.0) akan membuat output lebih fokus dan deterministik."
-    )
-    max_tokens = st.slider(
-        "Maksimum Token Output",
-        min_value=500, max_value=4000, value=1500, step=100,
-        help="Jumlah maksimum token yang diizinkan untuk respons AI. Sesuaikan berdasarkan panjang respons yang Anda harapkan."
-    )
-
-# --- Fungsi untuk Ekstraksi Teks dari PDF ---
-@st.cache_data # Cache hasil ekstraksi agar tidak diulang jika file tidak berubah
-def extract_text_from_pdf(pdf_file_bytes):
-    """Mengekstrak teks dari objek file PDF."""
-    reader = PyPDF2.PdfReader(io.BytesIO(pdf_file_bytes))
-    text = ""
-    for page_num in range(len(reader.pages)):
-        page = reader.pages[page_num]
-        text += page.extract_text() or "" # Gunakan string kosong jika tidak ada teks
-    return text
-
-# --- Fungsi untuk Menghitung Token ---
-@st.cache_data # Cache hasil perhitungan token
-def count_tokens(text, model_name):
-    """Menghitung jumlah token dalam teks menggunakan tiktoken."""
+# Fungsi untuk mengekstrak teks dari file PDF yang diunggah
+def extract_text_from_pdf(pdf_file):
+    """
+    Membaca file PDF yang diunggah dan mengekstrak teks dari semua halaman.
+    """
     try:
-        # Menyesuaikan nama model untuk tiktoken jika perlu (misal: gpt-4-turbo -> gpt-4)
-        if "gpt-4o" in model_name:
-            encoding_model = "gpt-4o"
-        elif "gpt-4" in model_name:
-            encoding_model = "gpt-4"
-        elif "gpt-3.5" in model_name:
-            encoding_model = "gpt-3.5-turbo"
-        else:
-            encoding_model = "cl100k_base" # Fallback umum
+        # Membaca file dalam memori
+        pdf_reader = PdfReader(io.BytesIO(pdf_file.read()))
+        text = ""
+        # Loop melalui setiap halaman dan tambahkan teksnya
+        for page in pdf_reader.pages:
+            text += page.extract_text() or ""
+        return text
+    except Exception as e:
+        st.error(f"Terjadi kesalahan saat membaca file PDF: {e}")
+        return None
 
-        encoding = tiktoken.encoding_for_model(encoding_model)
-        return len(encoding.encode(text))
-    except KeyError:
-        # Fallback jika model tidak dikenal oleh tiktoken secara spesifik
-        st.warning(f"Tiktoken tidak memiliki encoding spesifik untuk model '{model_name}'. Menggunakan perkiraan.")
-        return len(text.split()) # Perkiraan kasar berdasarkan jumlah kata
-
-# --- Fungsi untuk Analisis Kontrak dengan OpenAI ---
-def analyze_contract_with_openai(contract_text, openai_key, model_name, prompt_template, temp, tokens):
-    """Mengirim teks kontrak dan prompt ke OpenAI API untuk analisis."""
-    if not openai_key:
-        st.error("❌ Error: Silakan masukkan OpenAI API Key Anda di sidebar.")
+# Fungsi untuk menganalisis teks kontrak menggunakan API OpenAI
+def analyze_contract_with_openai(api_key, contract_text):
+    """
+    Mengirimkan teks kontrak ke OpenAI API untuk dianalisis.
+    """
+    # Validasi API Key
+    if not api_key.startswith('sk-'):
+        st.error("Format OpenAI API Key tidak valid. Pastikan diawali dengan 'sk-'.")
         return None
 
     try:
-        openai.api_key = openai_key
-        # Menggunakan Chat Completions API
-        response = openai.chat.completions.create(
-            model=model_name,
+        # Inisialisasi client OpenAI dengan API key
+        client = OpenAI(api_key=api_key)
+        
+        # Prompt yang dirancang untuk menganalisis dokumen kontrak
+        prompt_message = f"""
+        Anda adalah seorang asisten hukum AI yang ahli dalam menganalisis dokumen kontrak.
+        Tolong analisis teks dokumen kontrak berikut dan berikan ringkasan terstruktur dalam format Markdown.
+        Fokus pada poin-poin kunci berikut:
+
+        1.  **Ringkasan Umum**: Jelaskan secara singkat tujuan dari kontrak ini.
+        2.  **Para Pihak**: Identifikasi semua pihak yang terlibat dalam kontrak (misalnya, PIHAK PERTAMA, PIHAK KEDUA, nama perusahaan, atau individu).
+        3.  **Tanggal-Tanggal Penting**: Sebutkan tanggal efektif, tanggal berakhir, atau tanggal penting lainnya yang disebutkan.
+        4.  **Kewajiban Utama**: Rangkum kewajiban utama dari masing-masing pihak.
+        5.  **Klausul Penting**: Identifikasi klausul-klausul penting seperti klausul kerahasiaan, ganti rugi, pemutusan kontrak, dan yurisdiksi hukum.
+        6.  **Potensi Risiko atau Peringatan**: Tandai area mana pun yang mungkin ambigu, berisiko, atau memerlukan perhatian lebih lanjut.
+
+        Berikut adalah teks kontraknya:
+        ---
+        {contract_text}
+        ---
+        """
+
+        # Melakukan panggilan ke API
+        response = client.chat.completions.create(
+            model="gpt-4o",  # Atau model lain seperti "gpt-3.5-turbo"
             messages=[
-                {"role": "system", "content": "Anda adalah asisten AI yang ahli dalam menganalisis dokumen hukum dan kontrak. Berikan jawaban yang komprehensif, relevan, dan mudah dipahami."},
-                {"role": "user", "content": f"{prompt_template}\n\nKontrak:\n{contract_text}"}
+                {"role": "system", "content": "Anda adalah asisten hukum AI yang sangat teliti."},
+                {"role": "user", "content": prompt_message}
             ],
-            temperature=temp,
-            max_tokens=tokens
+            temperature=0.3, # Mengurangi kreativitas untuk hasil yang lebih faktual
+            max_tokens=1500  # Menambah batas token untuk dokumen yang panjang
         )
         return response.choices[0].message.content
-    except openai.AuthenticationError:
-        st.error("🚫 Autentikasi Gagal: API Key Anda salah atau tidak valid. Silakan periksa kembali.")
-        return None
-    except openai.RateLimitError:
-        st.error("⏳ Batas Frekuensi Tercapai: Anda telah mencapai batas frekuensi API OpenAI. Coba lagi sebentar lagi.")
-        return None
-    except openai.APITimeoutError:
-        st.error("⏰ Timeout API: Permintaan ke OpenAI memakan waktu terlalu lama. Coba lagi.")
-        return None
-    except openai.APIConnectionError as e:
-        st.error(f"🔌 Kesalahan Koneksi API: Tidak dapat terhubung ke OpenAI. Periksa koneksi internet Anda. Detail: {e}")
-        return None
+
     except Exception as e:
-        st.error(f"Terjadi kesalahan tak terduga saat berkomunikasi dengan OpenAI: {e}")
+        st.error(f"Terjadi kesalahan saat menghubungi API OpenAI: {e}")
         return None
 
-# --- Bagian Utama Aplikasi ---
-uploaded_file = st.file_uploader("⬆️ Unggah dokumen kontrak PDF Anda", type="pdf")
+# --- UI Aplikasi Streamlit ---
 
-if uploaded_file is not None:
-    st.success(f"✅ File '{uploaded_file.name}' berhasil diunggah!")
+# Judul utama aplikasi
+st.title("📄 Analisis Dokumen Kontrak dengan AI")
+st.write("Unggah dokumen kontrak Anda dalam format PDF untuk mendapatkan ringkasan dan analisis poin-poin kunci secara otomatis.")
 
-    # Baca teks dari PDF
-    with st.spinner("⏳ Mengekstrak teks dari PDF..."):
-        contract_text = extract_text_from_pdf(uploaded_file.getvalue())
+# Sidebar untuk input API Key
+with st.sidebar:
+    st.header("⚙️ Konfigurasi")
+    # Input API Key OpenAI dengan tipe password agar tidak terlihat
+    openai_api_key = st.text_input(
+        "Masukkan OpenAI API Key Anda", 
+        type="password",
+        help="Dapatkan API key Anda dari platform.openai.com"
+    )
+    st.markdown("---")
+    st.info("API Key Anda tidak disimpan dan hanya digunakan untuk sesi ini.")
 
-    if not contract_text.strip():
-        st.warning("⚠️ Tidak dapat mengekstrak teks yang berarti dari PDF ini. Pastikan PDF tidak kosong atau berbasis gambar (scan).")
+# Komponen untuk mengunggah file
+uploaded_file = st.file_uploader(
+    "Pilih file kontrak (PDF)", 
+    type="pdf"
+)
+
+# Tombol untuk memulai analisis
+if st.button("Analisa Dokumen"):
+    # Validasi sebelum memulai
+    if not openai_api_key:
+        st.warning("Silakan masukkan OpenAI API Key Anda di sidebar terlebih dahulu.")
+    elif uploaded_file is None:
+        st.warning("Silakan unggah file PDF kontrak terlebih dahulu.")
     else:
-        st.subheader("📜 Teks yang Diekstrak dari Kontrak:")
-        # Tampilkan sebagian teks dengan expander
-        with st.expander("Lihat teks lengkap (klik untuk memperluas)"):
-            st.text(contract_text[:1500] + "..." if len(contract_text) > 1500 else contract_text)
-
-        # Informasi token
-        num_tokens = count_tokens(contract_text, model_choice)
-        st.info(f"💡 Perkiraan jumlah token teks kontrak: **{num_tokens}** (Model: {model_choice})")
-        st.warning("Perhatikan batas token model. Teks yang terlalu panjang mungkin terpotong atau menimbulkan biaya lebih.")
-
-        st.subheader("🧠 Pilih Jenis Analisis atau Buat Kustom:")
-
-        analysis_options = {
-            "Ringkasan Kontrak": "Mohon berikan ringkasan singkat dari poin-poin penting, tujuan, dan pihak-pihak dalam kontrak ini.",
-            "Identifikasi Pihak & Peran": "Siapa saja pihak-pihak yang terlibat dalam kontrak ini? Jelaskan peran dan identitas masing-masing.",
-            "Kewajiban & Hak Utama": "Jelaskan secara detail kewajiban dan hak utama masing-masing pihak berdasarkan kontrak ini.",
-            "Ketentuan Pembayaran": "Analisis semua klausul terkait pembayaran, termasuk jadwal, jumlah, mata uang, dan konsekuensi keterlambatan.",
-            "Jangka Waktu & Perpanjangan": "Berapa lama jangka waktu kontrak ini? Apakah ada klausul perpanjangan otomatis atau manual?",
-            "Klausul Terminasi & Force Majeure": "Jelaskan kondisi-kondisi di mana kontrak dapat diakhiri (terminasi) dan apa yang diatur dalam klausul 'Force Majeure'.",
-            "Analisis Risiko & Potensi Masalah": "Identifikasi potensi risiko, klausul yang ambigu, atau poin-poin yang dapat menimbulkan perselisihan atau kerugian bagi salah satu pihak.",
-            "Bahasa Hukum Disederhanakan": "Jelaskan kontrak ini dalam bahasa yang sederhana dan mudah dipahami oleh non-hukum, fokus pada implikasi praktis.",
-            "Kustom": "Masukkan perintah analisis Anda sendiri"
-        }
-
-        selected_analysis_type = st.selectbox(
-            "Pilih jenis analisis cepat:",
-            list(analysis_options.keys())
-        )
-
-        prompt_input = ""
-        if selected_analysis_type == "Kustom":
-            prompt_input = st.text_area(
-                "Masukkan perintah analisis kustom Anda:",
-                "Jelaskan secara detail tentang hak dan kewajiban masing-masing pihak, dan identifikasi potensi risiko yang mungkin timbul.",
-                height=150,
-                placeholder="Misalnya: 'Identifikasi semua tanggal penting dan tenggat waktu dalam kontrak ini.'"
-            )
-        else:
-            prompt_input = analysis_options[selected_analysis_type]
-
-        if st.button("🚀 Mulai Analisis Kontrak", type="primary"):
-            if not openai_api_key:
-                st.warning("⚠️ Harap masukkan OpenAI API Key Anda di sidebar sebelum memulai analisis.")
-            elif not contract_text.strip():
-                st.warning("⚠️ Tidak ada teks kontrak yang dapat dianalisis.")
-            elif not prompt_input.strip():
-                st.warning("⚠️ Harap masukkan perintah analisis.")
-            else:
-                with st.spinner(f"⏳ Menganalisis kontrak menggunakan {model_choice}..."):
-                    analysis_result = analyze_contract_with_openai(
-                        contract_text,
-                        openai_api_key,
-                        model_choice,
-                        prompt_input,
-                        temperature,
-                        max_tokens
-                    )
-                    if analysis_result:
-                        st.subheader(f"✨ Hasil Analisis: {selected_analysis_type}")
-                        st.markdown(analysis_result) # Menggunakan markdown agar format lebih rapi
-                        st.info("⚠️ **Penting:** Hasil analisis ini dihasilkan oleh AI dan harus diverifikasi secara independen oleh profesional hukum atau pihak yang berwenang sebelum digunakan untuk pengambilan keputusan penting.")
-else:
-    st.info("⬆️ Unggah file PDF kontrak Anda untuk memulai analisis.")
-
-st.markdown("---")
-st.markdown("Dibangun dengan ❤️ menggunakan Streamlit dan OpenAI API.")
+        # Proses analisis jika semua sudah siap
+        with st.spinner("Harap tunggu, AI sedang membaca dan menganalisis dokumen..."):
+            # 1. Ekstrak teks dari PDF
+            contract_text = extract_text_from_pdf(uploaded_file)
+            
+            if contract_text:
+                st.info("✅ Teks berhasil diekstrak dari PDF. Mengirim ke AI untuk dianalisis...")
+                # 2. Kirim teks ke OpenAI untuk dianalisis
+                analysis_result = analyze_contract_with_openai(openai_api_key, contract_text)
+                
+                # 3. Tampilkan hasil
+                if analysis_result:
+                    st.subheader("Hasil Analisis Kontrak")
+                    st.markdown(analysis_result)
+                else:
+                    st.error("Gagal mendapatkan hasil analisis. Silakan periksa API Key Anda dan coba lagi.")
